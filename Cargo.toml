@@ -1,0 +1,35 @@
+[package]
+name = "remcached"
+version = "0.1.0"
+edition = "2021"
+readme = "README.md"
+description = "Caching system designed for efficient storage and retrieval of entities from remote repositories (REST APIs, Database, ...etc)"
+documentation = "https://docs.rs/remcached"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/manuelgdlvh/remcached"
+keywords = ["database", "cache", "async", "repository", "memory"]
+categories = ["database", "asynchronous"]
+authors = [
+    "Manuel Garcia de la Vega Hoyo <manuelgdlvh@gmail.com>",
+]
+
+[dependencies]
+dashmap = "6.1.0"
+log = "0.4.22"
+
+
+[dev-dependencies]
+sqlx = { version = "0.8.2", features = ["runtime-tokio", "postgres"] }
+tokio = { version = "1.42.0", features = ["rt-multi-thread", "macros"] }
+awaitility = "0.3.1"
+rstest = "0.22.0"
+rstest_reuse = "0.7.0"
+mockall = "0.13.0"
+testcontainers = { version = "0.21.1", features = ["blocking"] }
+ctor = "0.2.8"
+env_logger = "0.11.6"
+
+
+[[test]]
+name = "integration_tests"
+path = "tests/integration/mod.rs"
