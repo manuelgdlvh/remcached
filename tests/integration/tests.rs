@@ -160,14 +160,57 @@ async fn should_invalidate_successfully(#[case] game_id: i64, #[case] exp_time: 
     total_tasks += 1;
 
     cache_manager.invalidate(CACHE_ID, game_id, Game::new(game_id as u64, "Game test".to_string())).unwrap();
-    total_tasks += 2;
+    total_tasks += 1;
     awaitility::at_most(Duration::from_millis(MAX_POLL_AWAIT))
         .poll_interval(Duration::from_millis(MAX_POLL_INTERVAL_AWAIT))
-        .until(|| cache_manager_statistics.pending_tasks_total() == total_tasks - 1 && cache_manager_statistics.tasks_total() == total_tasks);
+        .until(|| cache_manager_statistics.pending_tasks_total() == total_tasks - 1 && (cache_manager_statistics.tasks_total() == total_tasks
+            || cache_manager_statistics.tasks_total() == total_tasks + 1));
 
     let game = game_repo.get(&game_id).await.unwrap();
     assert_eq!(game_id as u64, game.id);
     assert_eq!("Game test", game.title);
+}
+
+#[tokio::test]
+#[rstest]
+#[case(47557, 10000)]
+async fn should_merge_related_cache_tasks(#[case] game_id: i64, #[case] exp_time: u64) {
+    let (instances, cache_manager) = get_instances(&[(CACHE_ID, exp_time)]).await;
+    let cache_manager_statistics = cache_manager.statistics();
+    let game_repo = instances.get(0).unwrap();
+
+    // Generate one expiration
+    let mut total_tasks = 0;
+    game_repo.get(&game_id).await;
+    assert_eq!(true, game_repo.contains_key(&game_id));
+    total_tasks += 1;
+
+    // Generate one expiration and one invalidation (both expiration merged)
+    cache_manager.invalidate(CACHE_ID, game_id, Game::new(game_id as u64, "Game test".to_string())).unwrap();
+    total_tasks += 1;
+    awaitility::at_most(Duration::from_millis(MAX_POLL_AWAIT))
+        .poll_interval(Duration::from_millis(MAX_POLL_INTERVAL_AWAIT))
+        .until(|| cache_manager_statistics.pending_tasks_total() == total_tasks - 1 && (cache_manager_statistics.tasks_total() == total_tasks
+            || cache_manager_statistics.tasks_total() == total_tasks + 1));
+
+    assert_eq!(1, cache_manager_statistics.merged_tasks_total())
+}
+
+#[tokio::test]
+async fn should_manual_operations_fails_given_wrong_input() {
+    let (_, cache_manager) = get_instances(&[(CACHE_ID, LOWER_EXP_TIME)]).await;
+
+    // Expected key is i64
+    let key: u64 = 1234;
+    let valid_key: i64 = 1234;
+    let invalid_value = String::from("invalid!");
+    let valid_value = Game::new(valid_key as u64, "valid".to_string());
+
+    assert_eq!(true, cache_manager.flush_all("not_valid_cache_id").is_err());
+    assert_eq!(true, cache_manager.force_expiration(CACHE_ID, key).is_err());
+    assert_eq!(true, cache_manager.invalidate(CACHE_ID, valid_key, invalid_value).is_err());
+
+    assert_eq!(true, cache_manager.invalidate(CACHE_ID, valid_key, valid_value).is_ok());
 }
 
 

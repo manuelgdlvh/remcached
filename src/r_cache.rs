@@ -139,7 +139,7 @@ where
             config,
             remote_commands,
         });
-        cache_manager.register(RCacheTaskProcessor::new(self_.clone()));
+        cache_manager.register(RCacheInputValidator::<RC>::new(), RCacheTaskProcessor::new(self_.clone()));
         self_
     }
     pub async fn get(&self, key: &RC::Key) -> Option<RC::Value> {
@@ -170,7 +170,7 @@ where
                     }
 
                     if let Err(err) = self.task_producer.expire(key.clone()) {
-                        log::error!("expiration failed for #{key} entry and {} cache caused by: {err}", self.cache_id());
+                        log::error!("expiration failed for #{key} entry and #{} cache caused by: {err}", self.cache_id());
                         self.storage.remove(key);
                     }
 
@@ -199,7 +199,7 @@ where
 
             self.storage.insert(key.clone(), value.clone());
             if let Err(err) = self.task_producer.expire(key.clone()) {
-                log::error!("expiration failed for #{key} entry and {} cache caused by: {err}", self.cache_id());
+                log::error!("expiration failed for #{key} entry and #{} cache caused by: {err}", self.cache_id());
                 self.storage.remove(key);
             }
 
@@ -251,7 +251,7 @@ pub trait CacheTaskProcessor: Send + Sync {
     fn stop(&self);
     fn flush_all(&self);
     fn expire(&self, key: GenericType);
-    fn invalidate(&self, key: GenericType);
+    fn invalidate(&self, invalidation: GenericType);
     fn cache_id(&self) -> &'static str;
 }
 
@@ -294,32 +294,16 @@ where
 
     fn expire(&self, key: GenericType) {
         measure(&self.ref_.statistics.expirations_processed_total, &self.ref_.statistics.expirations_processed_time_ms, || {
-            let key = match key.downcast::<RC::Key>() {
-                Ok(val) => {
-                    val
-                }
-                Err(err) => {
-                    log::error!("expiration failed for {} cache caused by: {err:?}", self.ref_.cache_id());
-                    return;
-                }
-            };
+            let key = key.downcast::<RC::Key>().expect("Key conversion successfully");
 
             log::trace!("#{key} entry expired successfully for #{} cache", self.ref_.cache_id());
             self.ref_.storage.remove(&key);
         })
     }
 
-    fn invalidate(&self, key: GenericType) {
+    fn invalidate(&self, invalidation: GenericType) {
         measure(&self.ref_.statistics.invalidations_processed_total, &self.ref_.statistics.invalidations_processed_time_ms, || {
-            let invalidation = match key.downcast::<Invalidation<RC::Key, RC::Value>>() {
-                Ok(val) => {
-                    val
-                }
-                Err(err) => {
-                    log::error!("invalidation failed for {} cache caused by: {err:?}", self.ref_.cache_id());
-                    return;
-                }
-            };
+            let invalidation = invalidation.downcast::<Invalidation<RC::Key, RC::Value>>().expect("Invalidation conversion successfully");
 
             match self.ref_.storage.entry(invalidation.key().clone()) {
                 Entry::Occupied(mut entry) => {
@@ -339,9 +323,40 @@ where
             log::trace!("#{} entry invalidated successfully for #{} cache", invalidation.key(), self.ref_.cache_id());
         })
     }
-
     fn cache_id(&self) -> &'static str {
         self.ref_.cache_id()
     }
 }
+
+
+pub trait InputValidator: Send {
+    fn validate(&self, input: &GenericType, is_invalidation: bool) -> bool;
+}
+struct RCacheInputValidator<RC>
+where
+    RC: RCommands + 'static,
+{
+    phantom_: PhantomData<RC>,
+}
+impl<RC> RCacheInputValidator<RC>
+where
+    RC: RCommands + 'static,
+{
+    pub fn new() -> Self {
+        Self { phantom_: Default::default() }
+    }
+}
+
+impl<RC> InputValidator for RCacheInputValidator<RC>
+where
+    RC: RCommands + 'static,
+{
+    fn validate(&self, input: &GenericType, is_invalidation: bool) -> bool {
+        if !is_invalidation {
+            return input.downcast_ref::<RC::Key>().is_some();
+        }
+        input.downcast_ref::<Invalidation<RC::Key, RC::Value>>().is_some()
+    }
+}
+
 
