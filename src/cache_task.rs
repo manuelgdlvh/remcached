@@ -104,10 +104,7 @@ impl CacheTask {
         }
     }
     pub fn is_async(&self) -> bool {
-        match self {
-            CacheTask::Invalidation { .. } => true,
-            _ => { false }
-        }
+        matches!(self, CacheTask::Invalidation { .. })
     }
 
 
