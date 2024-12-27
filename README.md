@@ -33,6 +33,7 @@ load and improving response times for frequently accessed data.
 The AsyncExecutor is a way to manage tasks that run asynchronously, separate from the Cache Manager (which does not support async tasks). You can either create your own async executor using the AsyncExecutor and AsyncTask traits or use the one that is already implemented, such as TokioAsyncExecutor (which is the only option available right now).
 
 ## Cache Manager Cycle. What is?
+![cache_manager_task_cycle](https://github.com/user-attachments/assets/55b09b6d-9e39-49b8-9625-2bee02f2356c)
 
 
 
