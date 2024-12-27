@@ -65,8 +65,12 @@ ALTER TABLE game.game OWNER TO postgres;
 
 INSERT INTO game.game(game_id, name) values(47530, 'The Legend of Zelda: Ocarina of Time 3D');
 INSERT INTO game.game(game_id, name) values(47557, 'The Last of Us');
+INSERT INTO game.game(game_id, name) values(4755777, 'The Last of Us 2');
+INSERT INTO game.game(game_id, name) values(4755771, 'The Last of Us 3');
 INSERT INTO game.game(game_id, name) values(47573, 'American Truck Simulator');
 INSERT INTO game.game(game_id, name) values(47577, 'Euro Truck Simulator 2');
+
+
 
 
 

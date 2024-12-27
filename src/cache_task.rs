@@ -1,16 +1,17 @@
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 use std::mem;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::types::GenericType;
+use crate::utils::{calculate_time_until_next_ms, is_now_after};
 
 pub enum CacheTask {
-    Init { exp_time: u128, cache_id: &'static str },
-    Stop { exp_time: u128, cache_id: &'static str },
-    FlushAll { exp_time: u128, cache_id: &'static str },
-    EntryExpiration { exp_time: u128, cache_id: &'static str, id: String, key: GenericType },
-    Invalidation { exp_time: u128, cache_id: &'static str, id: String, invalidation: GenericType },
+    Init { cache_id: &'static str },
+    Stop { cache_id: &'static str },
+    FlushAll { cache_id: &'static str },
+    EntryExpiration { exec_time: u128, cache_id: &'static str, id: String, key: GenericType },
+    Invalidation { exp_time: u128, cache_id: &'static str, id: String, key: GenericType },
+    InvalidationWithProperties { cache_id: &'static str, id: String, invalidation: GenericType },
 }
 
 pub struct Invalidation<K, V> {
@@ -32,69 +33,83 @@ impl<K, V> Invalidation<K, V> {
 
 
 impl CacheTask {
-    pub fn entry_expiration<K>(expires_in: u64, cache_id: &'static str, key: K) -> CacheTask
+    pub fn entry_expiration<K>(exec_in: u64, cache_id: &'static str, key: K) -> CacheTask
     where
         K: Send + ToString + 'static,
     {
         let id = key.to_string();
         CacheTask::EntryExpiration {
-            exp_time: Self::calculate_exp_time(expires_in as u128),
+            exec_time: calculate_time_until_next_ms(exec_in),
             cache_id,
             id,
             key: Box::new(key) as GenericType,
         }
     }
 
-    pub fn invalidation<K, V>(cache_id: &'static str, key: K, value: V) -> CacheTask
+    pub fn invalidation_with_properties<K, V>(cache_id: &'static str, key: K, value: V) -> CacheTask
     where
         K: Send + ToString + 'static,
         V: Send + 'static,
     {
         let id = key.to_string();
-        CacheTask::Invalidation {
-            exp_time: Self::calculate_exp_time(0),
+        CacheTask::InvalidationWithProperties {
             cache_id,
             id,
             invalidation: Box::new(Invalidation::new(key, value)) as GenericType,
         }
     }
 
+    pub fn invalidation<K>(expires_in: u64, cache_id: &'static str, key: K) -> CacheTask
+    where
+        K: Send + ToString + 'static,
+    {
+        let id = key.to_string();
+        CacheTask::Invalidation {
+            exp_time: calculate_time_until_next_ms(expires_in),
+            cache_id,
+            id,
+            key: Box::new(key) as GenericType,
+        }
+    }
+
     pub fn flush_all(cache_id: &'static str) -> CacheTask {
         CacheTask::FlushAll {
-            exp_time: Self::calculate_exp_time(0),
             cache_id,
         }
     }
 
     pub fn init(cache_id: &'static str) -> CacheTask {
         CacheTask::Init {
-            exp_time: Self::calculate_exp_time(0),
             cache_id,
         }
     }
 
     pub fn stop(cache_id: &'static str) -> CacheTask {
         CacheTask::Stop {
-            exp_time: Self::calculate_exp_time(0),
             cache_id,
         }
     }
 
-
-    pub fn exp_time(&self) -> u128 {
+    pub fn exec_time(&self) -> u128 {
         match self {
-            CacheTask::Invalidation { exp_time, .. }
-            | CacheTask::Init { exp_time, .. }
-            | CacheTask::Stop { exp_time, .. }
-            | CacheTask::FlushAll { exp_time, .. }
-            | CacheTask::EntryExpiration { exp_time, .. } => *exp_time,
+            CacheTask::EntryExpiration { exec_time, .. } => *exec_time,
+            _ => 0,
         }
     }
 
-    fn calculate_exp_time(expires_in: u128) -> u128 {
-        SystemTime::now().duration_since(UNIX_EPOCH)
-            .expect("Time went backwards").as_millis() + expires_in
+    pub fn exp_time(&self) -> Option<u128> {
+        match self {
+            CacheTask::Invalidation { exp_time, .. } => Some(*exp_time),
+            _ => None,
+        }
     }
+    pub fn is_async(&self) -> bool {
+        match self {
+            CacheTask::Invalidation { .. } => true,
+            _ => { false }
+        }
+    }
+
 
     pub fn id(&self) -> Option<&str> {
         match self {
@@ -107,15 +122,26 @@ impl CacheTask {
     pub fn cache_id(&self) -> &'static str {
         match self {
             CacheTask::Invalidation { cache_id, .. }
+            | CacheTask::InvalidationWithProperties { cache_id, .. }
             | CacheTask::Init { cache_id, .. }
             | CacheTask::Stop { cache_id, .. }
             | CacheTask::FlushAll { cache_id, .. }
             | CacheTask::EntryExpiration { cache_id, .. } => cache_id,
         }
     }
+    pub fn is_executable(&self) -> bool {
+        is_now_after(self.exec_time())
+    }
+
     pub fn is_expired(&self) -> bool {
-        self.exp_time() <= SystemTime::now().duration_since(UNIX_EPOCH)
-            .expect("Time went backwards").as_millis()
+        match self.exp_time() {
+            None => {
+                false
+            }
+            Some(exp_time) => {
+                is_now_after(exp_time)
+            }
+        }
     }
 }
 
@@ -143,7 +169,7 @@ impl PartialOrd<Self> for CacheTask {
 impl Ord for CacheTask {
     // Ordering as priority
     fn cmp(&self, other: &Self) -> Ordering {
-        if self.exp_time() > other.exp_time() {
+        if self.exec_time() > other.exec_time() {
             return Ordering::Less;
         }
 

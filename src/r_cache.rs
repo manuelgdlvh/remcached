@@ -1,4 +1,6 @@
+use std::future::Future;
 use std::marker::PhantomData;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::atomic::Ordering::Relaxed;
@@ -8,6 +10,7 @@ use dashmap::{DashMap, Entry};
 
 use crate::cache_manager::CacheManager;
 use crate::cache_task::{CacheTask, Invalidation};
+use crate::async_executor::AsyncExecutor;
 use crate::metrics::{async_measure, measure};
 use crate::r_cache_config::RCacheConfig;
 use crate::r_commands::RCommands;
@@ -32,7 +35,7 @@ where
     }
 
     pub fn expire(&self, key: RC::Key) -> Result<(), SendError<CacheTask>> {
-        let task = CacheTask::entry_expiration(self.config.expires_in(), self.config.cache_id(), key);
+        let task = CacheTask::entry_expiration(self.config.entry_expires_in(), self.config.cache_id(), key);
         self.send(task)
     }
 
@@ -67,6 +70,7 @@ pub struct CacheStatistics {
     hits_time_ms: AtomicU64,
     miss_total: AtomicU64,
     miss_time_ms: AtomicU64,
+    gets_errors_total: AtomicU64,
     puts_total: AtomicU64,
     puts_errors_total: AtomicU64,
     puts_time_ms: AtomicU64,
@@ -99,6 +103,10 @@ impl CacheStatistics {
     pub fn miss_total(&self) -> u64 {
         self.miss_total.load(Relaxed)
     }
+    pub fn gets_errors_total(&self) -> u64 {
+        self.gets_errors_total.load(Relaxed)
+    }
+
     pub fn invalidations_processed_total(&self) -> u64 {
         self.invalidations_processed_total.load(Relaxed)
     }
@@ -130,7 +138,7 @@ impl<RC> RCache<RC>
 where
     RC: RCommands + 'static,
 {
-    pub fn build(cache_manager: &mut CacheManager, config: RCacheConfig, remote_commands: RC) -> Arc<RCache<RC>> {
+    pub fn build<E: AsyncExecutor>(cache_manager: &mut CacheManager<E>, config: RCacheConfig, remote_commands: RC) -> Arc<RCache<RC>> {
         let self_ = Arc::new(Self {
             task_producer: CacheTaskProducer::new(config, cache_manager.sender()),
             storage: DashMap::default(),
@@ -142,10 +150,10 @@ where
         cache_manager.register(RCacheInputValidator::<RC>::new(), RCacheTaskProcessor::new(self_.clone()));
         self_
     }
-    pub async fn get(&self, key: &RC::Key) -> Option<RC::Value> {
+    pub async fn get(&self, key: &RC::Key) -> Result<Option<RC::Value>, GenericError> {
         if !self.is_initialized() {
             return async_measure(&self.statistics.miss_total, &self.statistics.miss_time_ms, async {
-                self.remote_commands.get(key).await
+                self.get_internal(key).await
             }).await;
         }
 
@@ -153,9 +161,9 @@ where
             None => {
                 async_measure(&self.statistics.miss_total, &self.statistics.miss_time_ms, async {
                     log::trace!("cache miss for #{key} entry and #{} cache", self.cache_id());
-                    let val = match self.remote_commands.get(key).await {
+                    let val = match self.get_internal(key).await? {
                         None => {
-                            return None;
+                            return Ok(None);
                         }
                         Some(val) => {
                             val
@@ -166,21 +174,21 @@ where
                         Entry::Occupied(_) => {}
                         Entry::Vacant(entry) => {
                             entry.insert(val.clone());
+                            if let Err(err) = self.task_producer.expire(key.clone()) {
+                                log::error!("add expiration failed for #{key} entry and #{} cache caused by: {err}", self.cache_id());
+                                self.storage.remove(key);
+                            }
                         }
                     }
 
-                    if let Err(err) = self.task_producer.expire(key.clone()) {
-                        log::error!("expiration failed for #{key} entry and #{} cache caused by: {err}", self.cache_id());
-                        self.storage.remove(key);
-                    }
 
-                    Some(val)
+                    Ok(Some(val))
                 }).await
             }
             Some(val) => {
                 measure(&self.statistics.hits_total, &self.statistics.hits_time_ms, || {
                     log::trace!("cache hit for #{key} entry and #{} cache", self.cache_id());
-                    Some(val.value().clone())
+                    Ok(Some(val.value().clone()))
                 })
             }
         };
@@ -214,6 +222,15 @@ where
             return result;
         }
 
+        result
+    }
+
+    async fn get_internal(&self, key: &RC::Key) -> Result<Option<RC::Value>, GenericError> {
+        let result = self.remote_commands.get(key).await;
+        if result.is_err() {
+            log::error!("get failed for #{key} entry and #{} cache", self.cache_id());
+            self.statistics.gets_errors_total.fetch_add(1, Relaxed);
+        }
         result
     }
     fn is_initialized(&self) -> bool {
@@ -251,7 +268,8 @@ pub trait CacheTaskProcessor: Send + Sync {
     fn stop(&self);
     fn flush_all(&self);
     fn expire(&self, key: GenericType);
-    fn invalidate(&self, invalidation: GenericType);
+    fn invalidate_with_properties(&self, invalidation: GenericType);
+    fn invalidate(&self, key: GenericType) -> Pin<Box<dyn Future<Output=Result<(), GenericError>> + Send>>;
     fn cache_id(&self) -> &'static str;
 }
 
@@ -295,19 +313,18 @@ where
     fn expire(&self, key: GenericType) {
         measure(&self.ref_.statistics.expirations_processed_total, &self.ref_.statistics.expirations_processed_time_ms, || {
             let key = key.downcast::<RC::Key>().expect("Key conversion successfully");
-
             log::trace!("#{key} entry expired successfully for #{} cache", self.ref_.cache_id());
             self.ref_.storage.remove(&key);
         })
     }
 
-    fn invalidate(&self, invalidation: GenericType) {
+    fn invalidate_with_properties(&self, invalidation: GenericType) {
         measure(&self.ref_.statistics.invalidations_processed_total, &self.ref_.statistics.invalidations_processed_time_ms, || {
             let invalidation = invalidation.downcast::<Invalidation<RC::Key, RC::Value>>().expect("Invalidation conversion successfully");
 
             match self.ref_.storage.entry(invalidation.key().clone()) {
-                Entry::Occupied(mut entry) => {
-                    entry.insert(invalidation.value().clone());
+                Entry::Occupied(entry) => {
+                    entry.replace_entry(invalidation.value().clone());
                 }
                 Entry::Vacant(entry) => {
                     log::trace!("#{} entry invalidation skipped due to not found in #{} cache", entry.key(), self.ref_.cache_id());
@@ -320,9 +337,53 @@ where
                 return;
             }
 
-            log::trace!("#{} entry invalidated successfully for #{} cache", invalidation.key(), self.ref_.cache_id());
+            log::trace!("#{} entry invalidated with properties successfully for #{} cache", invalidation.key(), self.ref_.cache_id());
         })
     }
+
+
+    fn invalidate(&self, key: GenericType) -> Pin<Box<dyn Future<Output=Result<(), GenericError>> + Send>> {
+        let ref_ = Arc::clone(&self.ref_);
+        Box::pin(
+            async move {
+                let key = key.downcast::<RC::Key>().expect("Key conversion successfully");
+
+                if !ref_.storage.contains_key(&key) {
+                    log::trace!("#{} entry invalidation skipped due to not found in #{} cache", key, ref_.cache_id());
+                    return Ok(());
+                }
+
+                let result = match ref_.get_internal(&key).await? {
+                    None => {
+                        log::trace!("#{} entry invalidation skipped due to not found in remote repository for #{} cache", key, ref_.cache_id());
+                        return Ok(());
+                    }
+                    Some(result) => {
+                        result
+                    }
+                };
+
+                match ref_.storage.entry(*key.clone()) {
+                    Entry::Occupied(entry) => {
+                        entry.replace_entry(result);
+                    }
+                    Entry::Vacant(entry) => {
+                        log::trace!("#{} entry invalidation skipped due to not found in #{} cache", entry.key(), ref_.cache_id());
+                        return Ok(());
+                    }
+                }
+
+                if ref_.task_producer.expire(*key.clone()).is_err() {
+                    ref_.storage.remove(&key);
+                }
+
+                log::trace!("#{} entry invalidated successfully for #{} cache", key, ref_.cache_id());
+                Ok(())
+            }
+        )
+    }
+
+
     fn cache_id(&self) -> &'static str {
         self.ref_.cache_id()
     }
@@ -330,7 +391,7 @@ where
 
 
 pub trait InputValidator: Send {
-    fn validate(&self, input: &GenericType, is_invalidation: bool) -> bool;
+    fn validate(&self, input: &GenericType, is_invalidation_with_props: bool) -> bool;
 }
 struct RCacheInputValidator<RC>
 where

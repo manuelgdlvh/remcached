@@ -10,82 +10,110 @@ management system is flexible and can be integrated into your application to enh
 operations
 load and improving response times for frequently accessed data.
 
-Manual Operations Supported:
+<b>Manual Operations through Cache Manager:</b>
 1. Force Entry Expiration
-2. Invalidation
-3. Flush All
-4. Initialize
-5. Stop
+2. Invalidation with properties (Replace entry with provided tuple of Key - Value)
+3. Invalidation (Replace entry with latest value from remote repository)
+4. Flush All
+5. Initialize
+6. Stop
 
-Note: When the cache is stopped, all requests will be directed to the remote repository. This is particularly useful for flushing all data or performing intensive operations in the cache without blocking.
+<b>Note: When the cache is stopped, all requests will be directed to the remote repository. This is particularly useful for flushing all data or performing intensive operations in the cache without blocking.</b>
 
-Automatic Operations:
+<b>Automatic Operations:</b>
 
 1. Entry Expiration
 
+
+## Crate features
+1. <b>tokio</b> - Allow us to use TokioAsyncExecutor passing the Handle of your runtime for async cache tasks (Invalidation only at the moment!)
+
+## Async Executor
+
+The AsyncExecutor is a way to manage tasks that run asynchronously, separate from the Cache Manager (which does not support async tasks). You can either create your own async executor using the AsyncExecutor and AsyncTask traits or use the one that is already implemented, such as TokioAsyncExecutor (which is the only option available right now).
+
+## Cache Manager Cycle. What is?
+
+
+
+## Configuration
+### Cache Manager
+1. <b>max_pending_ms_await</b> - Maximum wait time (in milliseconds) between moving tasks from the input channel to the binary heap to process them.
+2. <b>max_pending_first_poll_ms_await</b> - Maximum wait time to poll the first item in the channel.
+3. <b>max_pending_bulk_poll_ms_await</b> - Maximum wait time to poll the next items of the channel after first poll.
+4. <b>max_task_drain_size</b> - Maximum number of tasks polled from the channel after first poll.
+
+
+### Cache
+1. <b>cache_id</b> - Unique identifier of cache
+2. <b>entry_expires_in</b> - Expiration time of cached entry
+
+
+
+## Monitoring
 RCache and Cache Manager provide read-only structures that expose detailed statistics for monitoring.
+### Cache Manager
+1. <b>tasks_total</b> - Total of tasks processed or ready to be processed.
+2. <b>merged_tasks_total</b> - Tasks merged to reduce processing of same Operation - Key.
+3. <b>expired_tasks_total</b> - Total tasks expired (Currently only can be expired invalidations using expires_in value).
+4. <b>pending_tasks_total</b> - Total pending tasks waiting to be processed.
+5. <b>pending_async_tasks_total</b> - Total pending async tasks scheduled in AsyncExecutor but not finished.
+6. <b>expired_async_tasks_total</b> - Total expired async tasks that were scheduled but not finished on time and aborted.
+7. <b>cycles_total</b> - Number of executed cycles.
+8. <b>cycles_time_ms</b> - Total amount in milliseconds executing cycles.
 
-## Key Features
+### Cache
+1. <b>hits_total</b> - Total amount of cache hits.
+2. <b>hits_time_ms</b> - Total amount in milliseconds of cache hits.
+3. <b>miss_total</b> - Total amount of cache miss.
+4. <b>miss_time_ms</b> - Total amount in milliseconds of cache miss.
+5. <b>gets_errors_total</b> - Total amount of errors in GET operations.
+6. <b>puts_total</b> - Total amount of PUT operations.
+7. <b>puts_errors_total</b> - Total amount of errors in PUT operations.
+8. <b>puts_time_ms</b> - Total amount in milliseconds of PUT operations.
+9. <b>invalidations_processed_total</b> - Total amount of invalidations processed. (With/out properties)
+10. <b>invalidations_processed_time_ms</b> - Total amount in milliseconds of invalidations processed. (With/out properties)
+11. <b>expirations_processed_total</b> - Total amount of entry expirations processed.
+12. <b>expirations_processed_time_ms</b> - Total amount in milliseconds of entry expirations processed.
 
-1. Automatic Cache Cleanup: Once an entry expires, it is automatically removed from the cache, maintaining memory
-   efficiency.
-2. Declarative Cache Design: Cache configuration is intuitive and allows developers to easily define expiration policies
-   for different types of data.
-3. Cache Efficiency: Reduces the need to repeatedly query the remote repository by storing frequently accessed data, leading to
-   faster response times.
 
-## How to Use
 
-1. Implement the RCommands Trait
 
-The first step is to implement the RCommands trait. This trait should define the essential operations for your specific
-repository:
+## How to Use (Using Database and Tokio runtime)
 
-    PUT: This operation stores a new entity or updates an existing one in the cache and remote repository.
-    GET: This operation retrieves the entity from the cache, if it exists, otherwise it can fetch the data from the remote repository.
-
-The trait ensures that all operations are standardized and consistent across different repositories.
-
-2. Construct a Cache Manager
-
-Once the RCommands trait is implemented, you need to construct a CacheManager struct.
-The CacheManager is responsible for managing multiple cache repositories and handling events such as entry expiration,
-invalidation, flush all, ...etc.
-
-3. Build Your Cache Repositories
-
-For each type of entity you want to cache, you need to create a corresponding repository that leverages the cache
-system. Each repository should handle the specific operations for the entity, ensuring that put and get operations
-interact with both the cache and the underlying remote repository in a consistent manner.
-
-Repositories can be easily built using the RCommands trait, and you can define custom expiration policies based on the
-entity type (for example, a short-lived session cache or a longer-lived configuration data cache).
-
-4. Start the Cache Manager
-
-Once the cache repositories are built, you can start the CacheManager. It will initialize and begin managing cache
-operations for all the repositories that have been registered. The CacheManager will automatically handle cache
-expiration according to the rules you have set.
-
-## Example of usage
 
 ```
-
+#[tokio::main]
 async fn main() {
+    
+    -------------------- Cache Manager -------------------- 
+    let async_executor = TokioAsyncExecutor::new(Handle::current());
+    let mut cache_manager = CacheManager::new(async_executor, CacheManagerConfig::new(3000, 2000, 20, 2048));
+    -------------------- Cache's --------------------
     let db_pool = get_db_pool().await;
-    let mut cache_manager = CacheManager::new(CacheManagerConfig::new(MAX_PENDING_MS_AWAIT, 20, 2048));
+    
     let r_cache = RCache::build(
             &mut cache_manager,
             RCacheConfig::new("cache_id", 60000),
+            GameDbCommands::new(db_pool.clone()),
+        );
+    let r_cache_2 = RCache::build(
+            &mut cache_manager,
+            RCacheConfig::new("cache_id_2", 60000),
             GameDbCommands::new(db_pool),
         );
-
+            
+    -------------------- Start -------------------- 
     cache_manager.start();
+    
     let result = r_cache.get(&1234).await;
+    let result = r_cache_2.get(&1234).await;
+
 }
 
 
-// Commands for this entity
+-------------------- Commands -------------------- 
+
 pub struct GameDbCommands {
     db_pool: Pool<Postgres>,
 }
@@ -124,7 +152,7 @@ impl RCommands for GameDbCommands {
     }
 }
 
-// Entity
+-------------------- Entity -------------------- 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Game {
     pub id: u64,

@@ -1,6 +1,6 @@
 [package]
 name = "remcached"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 readme = "README.md"
 description = "Caching system designed for efficient storage and retrieval of entities from remote repositories (REST APIs, Database, ...etc)"
@@ -18,11 +18,14 @@ dashmap = "6.1.0"
 thiserror = "2.0.9"
 anyhow = "1.0.95"
 log = "0.4.22"
+tokio = { version = "1.42.0", optional = true }
 
+
+[features]
+tokio = ["dep:tokio"]
 
 [dev-dependencies]
 sqlx = { version = "0.8.2", features = ["runtime-tokio", "postgres"] }
-tokio = { version = "1.42.0", features = ["rt-multi-thread", "macros"] }
 awaitility = "0.3.1"
 rstest = "0.22.0"
 rstest_reuse = "0.7.0"
@@ -35,3 +38,4 @@ env_logger = "0.11.6"
 [[test]]
 name = "integration_tests"
 path = "tests/integration/mod.rs"
+required-features = ["tokio"]
