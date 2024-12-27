@@ -19,4 +19,4 @@ jobs:
     - name: Build
       run: cargo build --verbose
     - name: Run Integration Tests
-      run: cargo test --test integration_tests --verbose
+      run: cargo test --test integration_tests --features="tokio" --verbose
